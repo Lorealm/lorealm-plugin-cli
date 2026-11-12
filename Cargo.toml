@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Create, build and release Lorealm plugins"
+repository = "https://github.com/Lorealm/lorealm-plugin-cli"
+readme = "README.md"
 
 [[bin]]
 name = "lorealm-plugin"
