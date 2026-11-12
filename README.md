@@ -10,7 +10,7 @@ cargo install lorealm-plugin-cli
 
 | Command | What it does |
 |---|---|
-| `lorealm-plugin new` | Asks a few questions and creates a plugin: its manifest, a Rust backend on the `lorealm-plugin` SDK, a frontend slot and settings if you want them, and a release workflow for GitHub. |
+| `lorealm-plugin new` | Asks a few questions and creates a plugin: its manifest, a Rust backend on the `lorealm-plugin` SDK, a frontend slot, settings and a LICENSE if you want them, and a release workflow for GitHub. |
 | `lorealm-plugin doctor` | Checks that what plugins are built with is installed. `--fix` installs what it can. |
 | `lorealm-plugin build` | Runs the manifest's `[build]` commands. |
 | `lorealm-plugin check` | Builds the plugin and checks a release of it would install. |
@@ -18,7 +18,7 @@ cargo install lorealm-plugin-cli
 | `lorealm-plugin stage 0.2.0` | Sets the version in `manifest.toml` and `Cargo.toml`, commits that and tags it `v0.2.0`. Nothing is pushed. It refuses when there are uncommitted changes. |
 | `lorealm-plugin publish` | Pushes the branch and the staged tag. The release workflow then builds the plugin and attaches the zip to a GitHub release. |
 
-`new` takes its answers as options too, for scripts: `lorealm-plugin new --yes --name "Word Count" --hook after-generate --slot message`.
+`new` takes its answers as options too, for scripts: `lorealm-plugin new --yes --name "Word Count" --hook after-generate --slot message --license mit`. With `--yes` and no `--license`, no LICENSE is written.
 
 ## What a release holds
 

@@ -35,6 +35,9 @@ pub struct Args {
     /// Give it settings the user can fill in
     #[arg(long)]
     settings: bool,
+    /// The license to put in LICENSE. `none` writes no LICENSE.
+    #[arg(long, value_enum)]
+    license: Option<License>,
     /// Don't ask anything; use the options given, and defaults for the rest
     #[arg(long, short)]
     yes: bool,
@@ -53,6 +56,57 @@ impl Slot {
             Self::Inspector => "inspector",
             Self::Message => "message",
             Self::Composer => "composer",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum License {
+    Mit,
+    #[value(name = "apache-2.0")]
+    Apache2,
+    #[value(name = "gpl-3.0")]
+    Gpl3,
+    #[value(name = "mpl-2.0")]
+    Mpl2,
+    Unlicense,
+    None,
+}
+
+impl License {
+    /// Its SPDX identifier, for `license` in Cargo.toml.
+    fn spdx(self) -> Option<&'static str> {
+        match self {
+            Self::Mit => Some("MIT"),
+            Self::Apache2 => Some("Apache-2.0"),
+            Self::Gpl3 => Some("GPL-3.0-only"),
+            Self::Mpl2 => Some("MPL-2.0"),
+            Self::Unlicense => Some("Unlicense"),
+            Self::None => None,
+        }
+    }
+
+    fn about(self) -> &'static str {
+        match self {
+            Self::Mit => "MIT: do anything, keep the notice",
+            Self::Apache2 => "Apache-2.0: like MIT, with a patent grant",
+            Self::Gpl3 => "GPL-3.0: changed versions must stay open source",
+            Self::Mpl2 => "MPL-2.0: changed files must stay open source",
+            Self::Unlicense => "Unlicense: public domain",
+            Self::None => "None: I'll add my own",
+        }
+    }
+
+    /// The text of LICENSE, with `{{year}}` and `{{author}}` for the
+    /// copyright line where the license has one.
+    fn template(self) -> Option<&'static str> {
+        match self {
+            Self::Mit => Some(include_str!("../templates/licenses/MIT")),
+            Self::Apache2 => Some(include_str!("../templates/licenses/Apache-2.0")),
+            Self::Gpl3 => Some(include_str!("../templates/licenses/GPL-3.0")),
+            Self::Mpl2 => Some(include_str!("../templates/licenses/MPL-2.0")),
+            Self::Unlicense => Some(include_str!("../templates/licenses/Unlicense")),
+            Self::None => None,
         }
     }
 }
@@ -181,6 +235,7 @@ struct Answers {
     hooks: Vec<Hook>,
     slot: Option<Slot>,
     settings: bool,
+    license: License,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -269,6 +324,20 @@ fn ask(args: Args) -> Result<Answers> {
                 .prompt()?;
         }
     }
+    // Without being asked, it writes no license: choosing one is the
+    // author's call.
+    let license = match args.license {
+        Some(license) => license,
+        None if quiet => License::None,
+        None => {
+            let labels: Vec<&str> = License::value_variants()
+                .iter()
+                .map(|license| license.about())
+                .collect();
+            let picked = Select::new("License", labels).raw_prompt()?;
+            License::value_variants()[picked.index]
+        }
+    };
     hooks.dedup();
 
     Ok(Answers {
@@ -279,6 +348,7 @@ fn ask(args: Args) -> Result<Answers> {
         hooks,
         slot,
         settings,
+        license,
     })
 }
 
@@ -328,7 +398,41 @@ fn write(dir: &Path, answers: &Answers) -> Result<()> {
             "#inputs\ngreeting: string = \"Hello\"\n".into(),
         )?;
     }
+    if let Some(template) = answers.license.template() {
+        let holder = if answers.author.is_empty() {
+            format!("the {} authors", answers.name)
+        } else {
+            answers.author.clone()
+        };
+        put(
+            "LICENSE",
+            template
+                .replace("{{year}}", &this_year().to_string())
+                .replace("{{author}}", &holder),
+        )?;
+    }
     Ok(())
+}
+
+/// The current year, in UTC.
+fn this_year() -> i64 {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    year_of(seconds.div_euclid(86_400))
+}
+
+/// The year of the day `days` after 1970-01-01, from Howard Hinnant's
+/// `civil_from_days`.
+fn year_of(days: i64) -> i64 {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    yoe + era * 400 + i64::from(month <= 2)
 }
 
 /// A TOML string.
@@ -383,12 +487,17 @@ backend = ["cargo", "build", "--release", "--target", "wasm32-wasip2"]
 }
 
 fn cargo(answers: &Answers) -> String {
+    let license = answers
+        .license
+        .spdx()
+        .map(|spdx| format!("license = \"{spdx}\"\n"))
+        .unwrap_or_default();
     format!(
         r#"[package]
 name = "{handle}"
 version = "0.1.0"
 edition = "2024"
-publish = false
+{license}publish = false
 
 [lib]
 crate-type = ["cdylib"]
@@ -472,5 +581,22 @@ mod tests {
     fn hooks_are_named_as_the_sdk_names_them() {
         assert_eq!(Hook::AfterGenerate.name(), "after-generate");
         assert_eq!(Hook::AfterGenerate.variant(), "AfterGenerate");
+    }
+
+    #[test]
+    fn days_become_years() {
+        assert_eq!(year_of(0), 1970);
+        assert_eq!(year_of(-1), 1969);
+        assert_eq!(year_of(10_957), 2000); // 2000-01-01
+        assert_eq!(year_of(11_322), 2000); // 2000-12-31
+        assert_eq!(year_of(20_770), 2026); // 2026-11-13
+    }
+
+    #[test]
+    fn every_license_but_none_has_a_text_and_an_identifier() {
+        for license in License::value_variants() {
+            assert_eq!(license.template().is_some(), license.spdx().is_some());
+        }
+        assert!(License::Mit.template().unwrap().contains("{{author}}"));
     }
 }
