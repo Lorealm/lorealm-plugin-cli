@@ -1,0 +1,22 @@
+name: Release
+
+# Builds the plugin and attaches it to a release, for every version tag.
+# `lorealm-plugin publish` pushes that tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-wasip2
+      - run: cargo install lorealm-plugin-cli --locked
+      - run: lorealm-plugin package --tag "$GITHUB_REF_NAME"
+      - run: gh release create "$GITHUB_REF_NAME" dist/*.zip --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      /* The app's style variables are available here. */
+      body {
+        margin: 0;
+        padding: var(--spacing-sm, 8px);
+        font-family: var(--font-family-body, sans-serif);
+        font-size: var(--font-size-sm);
+        color: var(--color-text-primary);
+      }
+    </style>
+  </head>
+  <body>
+    <button id="hello" type="button">Say hello</button>
+    <p id="answer"></p>
+    <script>
+      // `lorealm.call` reaches this plugin's own backend, in `frontend`.
+      document.getElementById('hello').onclick = async () => {
+        const answer = document.getElementById('answer');
+        try {
+          answer.textContent = await lorealm.call('hello');
+        } catch (e) {
+          answer.textContent = e.message;
+        }
+      };
+    </script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+[package]
+name = "lorealm-plugin-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Create, build and release Lorealm plugins"
+
+[[bin]]
+name = "lorealm-plugin"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+inquire = "0.9.4"
+lorealm_plugin_manifest = "0.1.0"
+semver = "1.0.28"
+sha2 = "0.11.1"
+toml_edit = "0.25.19"
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }

@@ -1,0 +1,476 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail};
+use clap::ValueEnum;
+use inquire::{Confirm, MultiSelect, Select, Text};
+
+use crate::doctor;
+use crate::project::{Project, SDK, is_identifier};
+use crate::run::output;
+
+/// The plugin API new plugins are written for, and the version of the SDK
+/// that targets it.
+const API: &str = "0.1.0";
+
+#[derive(clap::Args)]
+pub struct Args {
+    /// Where to create it. Defaults to a folder named after its handle
+    dir: Option<PathBuf>,
+    /// Human-readable title
+    #[arg(long)]
+    name: Option<String>,
+    /// Its unique identifier, such as `word_count`
+    #[arg(long)]
+    handle: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long)]
+    author: Option<String>,
+    /// A hook to handle. Repeat it for several
+    #[arg(long = "hook", value_enum)]
+    hooks: Vec<Hook>,
+    /// Where it appears in the client
+    #[arg(long, value_enum)]
+    slot: Option<Slot>,
+    /// Give it settings the user can fill in
+    #[arg(long)]
+    settings: bool,
+    /// Don't ask anything; use the options given, and defaults for the rest
+    #[arg(long, short)]
+    yes: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum Slot {
+    Inspector,
+    Message,
+    Composer,
+}
+
+impl Slot {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Inspector => "inspector",
+            Self::Message => "message",
+            Self::Composer => "composer",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum Hook {
+    UserMessage,
+    PromptBuild,
+    LorebookActivate,
+    MessageFinalize,
+    AfterGenerate,
+    ToolCall,
+    ToolResult,
+    TurnStart,
+    TurnEnd,
+    Upgrade,
+    SettingsChanged,
+    Shutdown,
+}
+
+impl Hook {
+    fn name(self) -> String {
+        self.to_possible_value()
+            .expect("no hook is skipped")
+            .get_name()
+            .to_owned()
+    }
+
+    /// `Hook::{variant}` in the SDK.
+    fn variant(self) -> String {
+        self.name()
+            .split('-')
+            .map(|word| word[..1].to_uppercase() + &word[1..])
+            .collect()
+    }
+
+    fn about(self) -> &'static str {
+        match self {
+            Self::UserMessage => "change or refuse what the user sends",
+            Self::PromptBuild => "change the prompt before it's sent to the model",
+            Self::LorebookActivate => "change which lorebook entries are inserted",
+            Self::MessageFinalize => "change a reply before it's saved",
+            Self::AfterGenerate => "react to a saved reply",
+            Self::ToolCall => "change or refuse the model's tool calls",
+            Self::ToolResult => "change what a tool returned",
+            Self::TurnStart => "react to a turn starting",
+            Self::TurnEnd => "react to a finished turn",
+            Self::Upgrade => "migrate data from another version of the plugin",
+            Self::SettingsChanged => "react to the user saving settings",
+            Self::Shutdown => "save things before the plugin is unloaded",
+        }
+    }
+
+    /// The permission the server asks for before it registers the hook.
+    fn permission(self) -> Option<&'static str> {
+        match self {
+            Self::PromptBuild | Self::LorebookActivate => Some("prompt:write"),
+            Self::AfterGenerate | Self::TurnStart | Self::TurnEnd => Some("chat:read"),
+            Self::MessageFinalize | Self::UserMessage => Some("chat:write"),
+            Self::ToolCall | Self::ToolResult => Some("tools:write"),
+            Self::Upgrade | Self::SettingsChanged | Self::Shutdown => None,
+        }
+    }
+
+    /// Its method in `impl Plugin`, doing nothing, and the SDK types that
+    /// names.
+    fn stub(self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Self::UserMessage => (
+                "fn user_message(&mut self, _input: UserInput) -> Result<Verdict> {\n        Ok(Verdict::Allow)\n    }",
+                &["UserInput", "Verdict"],
+            ),
+            Self::PromptBuild => (
+                "fn prompt_build(&mut self, prompt: PromptAssembly) -> Result<Vec<Message>> {\n        Ok(prompt.messages)\n    }",
+                &["Message", "PromptAssembly"],
+            ),
+            Self::LorebookActivate => (
+                "fn lorebook_activate(&mut self, activation: LorebookActivation) -> Result<Vec<LorebookEntry>> {\n        Ok(activation.entries)\n    }",
+                &["LorebookActivation", "LorebookEntry"],
+            ),
+            Self::MessageFinalize => (
+                "fn message_finalize(&mut self, reply: Finalizing) -> Result<String> {\n        Ok(reply.content)\n    }",
+                &["Finalizing"],
+            ),
+            Self::AfterGenerate => (
+                "fn after_generate(&mut self, _reply: Generated) -> Result<()> {\n        Ok(())\n    }",
+                &["Generated"],
+            ),
+            Self::ToolCall => (
+                "fn tool_call(&mut self, _call: ToolInvocation) -> Result<Verdict> {\n        Ok(Verdict::Allow)\n    }",
+                &["ToolInvocation", "Verdict"],
+            ),
+            Self::ToolResult => (
+                "fn tool_result(&mut self, output: ToolOutput) -> Result<Value> {\n        Ok(serde_json::from_str(&output.result)?)\n    }",
+                &["ToolOutput", "Value", "serde_json"],
+            ),
+            Self::TurnStart => (
+                "fn turn_start(&mut self, _turn: TurnStarted) -> Result<()> {\n        Ok(())\n    }",
+                &["TurnStarted"],
+            ),
+            Self::TurnEnd => (
+                "fn turn_end(&mut self, _turn: TurnEnded) -> Result<()> {\n        Ok(())\n    }",
+                &["TurnEnded"],
+            ),
+            Self::Upgrade => (
+                "fn upgrade(&mut self, _from: Option<String>) -> Result<()> {\n        Ok(())\n    }",
+                &[],
+            ),
+            Self::SettingsChanged => (
+                "fn settings_changed(&mut self) -> Result<()> {\n        Ok(())\n    }",
+                &[],
+            ),
+            Self::Shutdown => (
+                "fn shutdown(&mut self) -> Result<()> {\n        Ok(())\n    }",
+                &[],
+            ),
+        }
+    }
+}
+
+struct Answers {
+    name: String,
+    handle: String,
+    description: String,
+    author: String,
+    hooks: Vec<Hook>,
+    slot: Option<Slot>,
+    settings: bool,
+}
+
+pub fn run(args: Args) -> Result<()> {
+    let dir = args.dir.clone();
+    let answers = ask(args)?;
+    let dir = dir.unwrap_or_else(|| PathBuf::from(&answers.handle));
+    if dir.exists() && std::fs::read_dir(&dir)?.next().is_some() {
+        bail!("{} already has something in it", dir.display());
+    }
+    write(&dir, &answers)?;
+    let _ = output(&dir, "cargo", &["fmt"]);
+    
+    Project::open(&dir)?;
+    
+    if output(&dir, "git", &["rev-parse", "--git-dir"]).is_err() {
+        let _ = output(&dir, "git", &["init"]);
+    }
+
+    println!("Created {} in {}", answers.name, dir.display());
+    println!("Build it with `lorealm-plugin build` within the folder.");
+    
+    let (missing, _) = doctor::missing(false)?;
+    for line in missing {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn ask(args: Args) -> Result<Answers> {
+    let quiet = args.yes;
+    let text = |given: Option<String>, question: &str, default: String| -> Result<String> {
+        match given {
+            Some(given) => Ok(given),
+            None if quiet => Ok(default),
+            None => Ok(Text::new(question).with_default(&default).prompt()?),
+        }
+    };
+
+    let name = text(args.name, "Name", "My Plugin".into())?;
+    let handle = text(args.handle, "Handle (its unique identifier)", slug(&name))?;
+    if !is_identifier(&handle) {
+        bail!(
+            "the handle `{handle}` isn't an identifier: letters, digits and `_`, not starting with a digit"
+        );
+    }
+    let description = text(
+        args.description,
+        "Description, in a sentence",
+        String::new(),
+    )?;
+    let git_name = output(Path::new("."), "git", &["config", "user.name"]).unwrap_or_default();
+    let author = text(args.author, "Author", git_name)?;
+
+    let mut hooks = args.hooks;
+    let mut slot = args.slot;
+    let mut settings = args.settings;
+    if !quiet {
+        if hooks.is_empty() {
+            let labels: Vec<String> = Hook::value_variants()
+                .iter()
+                .map(|hook| format!("{}: {}", hook.name(), hook.about()))
+                .collect();
+            let picked = MultiSelect::new("Hooks to handle", labels.clone()).prompt()?;
+            hooks = Hook::value_variants()
+                .iter()
+                .zip(&labels)
+                .filter(|(_, label)| picked.contains(label))
+                .map(|(hook, _)| *hook)
+                .collect();
+        }
+        if slot.is_none() {
+            let places = vec![
+                "nowhere",
+                "inspector: a widget in the inspector",
+                "message: under replies",
+                "composer: above the chat bar",
+            ];
+            let picked = Select::new("Where it appears in the client", places.clone()).prompt()?;
+            slot = [Slot::Inspector, Slot::Message, Slot::Composer]
+                .into_iter()
+                .find(|slot| picked.starts_with(slot.name()));
+        }
+        if !settings {
+            settings = Confirm::new("Give it settings the user can fill in?")
+                .with_default(false)
+                .prompt()?;
+        }
+    }
+    hooks.dedup();
+
+    Ok(Answers {
+        name,
+        handle,
+        description,
+        author,
+        hooks,
+        slot,
+        settings,
+    })
+}
+
+/// `name` as a handle: `My Plugin!` is `my_plugin`.
+fn slug(name: &str) -> String {
+    let slug = name
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    match slug.chars().next() {
+        Some(first) if !first.is_ascii_digit() => slug,
+        _ => format!("plugin_{slug}").trim_end_matches('_').to_owned(),
+    }
+}
+
+fn write(dir: &Path, answers: &Answers) -> Result<()> {
+    let put = |path: &str, content: String| -> Result<()> {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("a file is in a folder"))?;
+        Ok(std::fs::write(path, content)?)
+    };
+    put("manifest.toml", manifest(answers))?;
+    put("Cargo.toml", cargo(answers))?;
+    put("src/lib.rs", source(answers))?;
+    put(".gitignore", "target\ndist\n".into())?;
+    put(
+        "README.md",
+        include_str!("../templates/README.md")
+            .replace("{{name}}", &answers.name)
+            .replace("{{description}}", &answers.description),
+    )?;
+    put(
+        ".github/workflows/release.yml",
+        include_str!("../templates/release.yml").into(),
+    )?;
+    if let Some(slot) = answers.slot {
+        put(
+            &format!("frontend/{}.html", slot.name()),
+            include_str!("../templates/slot.html").into(),
+        )?;
+    }
+    if answers.settings {
+        put(
+            "settings.wtn",
+            "#inputs\ngreeting: string = \"Hello\"\n".into(),
+        )?;
+    }
+    Ok(())
+}
+
+/// A TOML string.
+fn quoted(text: &str) -> String {
+    toml_edit::Value::from(text).to_string()
+}
+
+fn manifest(answers: &Answers) -> String {
+    let mut permissions: Vec<&str> = answers
+        .hooks
+        .iter()
+        .filter_map(|h| h.permission())
+        .collect();
+    permissions.sort();
+    permissions.dedup();
+    let permissions: Vec<String> = permissions.into_iter().map(quoted).collect();
+
+    let mut manifest = format!(
+        r#"[plugin]
+name = {name}
+handle = {handle}
+description = {description}
+tags = []
+author = {author}
+version = "0.1.0"
+# The plugin API this is built for, which is the version of `{SDK}` in
+# Cargo.toml. A server only runs plugins built for its own.
+api = "{API}"
+permissions = [{permissions}]
+
+[structure]
+backend = "target/wasm32-wasip2/release/{crate_name}.wasm"
+
+[build]
+backend = ["cargo", "build", "--release", "--target", "wasm32-wasip2"]
+"#,
+        name = quoted(&answers.name),
+        handle = quoted(&answers.handle),
+        description = quoted(&answers.description),
+        author = quoted(&answers.author),
+        permissions = permissions.join(", "),
+        crate_name = answers.handle,
+    );
+    if let Some(slot) = answers.slot {
+        manifest.push_str(&format!(
+            "\n[[frontend.slots]]\nslot = \"{slot}\"\nentry = \"{slot}.html\"\ntitle = {title}\n",
+            slot = slot.name(),
+            title = quoted(&answers.name),
+        ));
+    }
+    manifest
+}
+
+fn cargo(answers: &Answers) -> String {
+    format!(
+        r#"[package]
+name = "{handle}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+{SDK} = "{API}"
+"#,
+        handle = answers.handle
+    )
+}
+
+fn source(answers: &Answers) -> String {
+    let mut imports = vec!["Plugin", "Result"];
+    let mut methods = Vec::new();
+    let mut registers = Vec::new();
+    if !answers.hooks.is_empty() {
+        imports.extend(["Hook", "host"]);
+    }
+    for hook in &answers.hooks {
+        let (method, types) = hook.stub();
+        imports.extend(types);
+        methods.push(method.to_owned());
+        registers.push(format!(
+            "        host::register_hook(Hook::{})?;\n",
+            hook.variant()
+        ));
+    }
+    if answers.slot.is_some() {
+        imports.extend(["FrontendCall", "Value", "json"]);
+        methods.push(
+            "/// A call from the plugin's frontend, made with `lorealm.call(name, args)`.\n    fn frontend(&mut self, call: FrontendCall) -> Result<Value> {\n        match call.name.as_str() {\n            \"hello\" => Ok(json!(\"Hello from the backend!\")),\n            other => Err(format!(\"unknown call `{other}`\").into()),\n        }\n    }"
+                .to_owned(),
+        );
+    }
+    imports.sort();
+    imports.dedup();
+
+    let type_name: String = answers
+        .handle
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| word[..1].to_uppercase() + &word[1..])
+        .collect();
+    let methods: String = methods
+        .iter()
+        .map(|method| format!("\n    {method}\n"))
+        .collect();
+    format!(
+        r#"use lorealm_plugin::{{{imports}}};
+
+/// Lives for as long as the plugin is loaded. Keep what it remembers between
+/// calls in here.
+struct {type_name};
+
+impl Plugin for {type_name} {{
+    /// Called once when the plugin is loaded.
+    fn init() -> Result<Self> {{
+{registers}        Ok(Self)
+    }}
+{methods}}}
+
+lorealm_plugin::export!({type_name});
+"#,
+        imports = imports.join(", "),
+        registers = registers.concat(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_becomes_a_handle() {
+        assert_eq!(slug("My Plugin!"), "my_plugin");
+        assert_eq!(slug("3D  Dice"), "plugin_3d_dice");
+        assert_eq!(slug("???"), "plugin");
+    }
+
+    #[test]
+    fn hooks_are_named_as_the_sdk_names_them() {
+        assert_eq!(Hook::AfterGenerate.name(), "after-generate");
+        assert_eq!(Hook::AfterGenerate.variant(), "AfterGenerate");
+    }
+}

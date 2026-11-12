@@ -1,0 +1,25 @@
+# lorealm-plugin-cli
+
+Create, build and release [Lorealm](https://github.com/Lorealm/Lorealm) plugins.
+
+```sh
+cargo install lorealm-plugin-cli
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `lorealm-plugin new` | Asks a few questions and creates a plugin: its manifest, a Rust backend on the `lorealm-plugin` SDK, a frontend slot and settings if you want them, and a release workflow for GitHub. |
+| `lorealm-plugin doctor` | Checks that what plugins are built with is installed. `--fix` installs what it can. |
+| `lorealm-plugin build` | Runs the manifest's `[build]` commands. |
+| `lorealm-plugin check` | Builds the plugin and checks a release of it would install. |
+| `lorealm-plugin package` | Builds the plugin and zips what a release ships into `dist`, printing the zip's sha256. |
+| `lorealm-plugin stage 0.2.0` | Sets the version in `manifest.toml` and `Cargo.toml`, commits that and tags it `v0.2.0`. Nothing is pushed. It refuses when there are uncommitted changes. |
+| `lorealm-plugin publish` | Pushes the branch and the staged tag. The release workflow then builds the plugin and attaches the zip to a GitHub release. |
+
+`new` takes its answers as options too, for scripts: `lorealm-plugin new --yes --name "Word Count" --hook after-generate --slot message`.
+
+## What a release holds
+
+One zip with `manifest.toml` at its top and the files it points at: the backend, the frontend when the plugin has slots, the README and the settings. A Lorealm server installs it as it is, without building anything.
