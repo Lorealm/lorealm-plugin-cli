@@ -32,6 +32,10 @@ pub struct Args {
     /// Where it appears in the client
     #[arg(long, value_enum)]
     slot: Option<Slot>,
+    /// What the slot is written in. `typescript` builds it with Vite and
+    /// needs Node, and in return IDEs complete the `lorealm` API
+    #[arg(long, value_enum)]
+    frontend: Option<Frontend>,
     /// Give it settings the user can fill in
     #[arg(long)]
     settings: bool,
@@ -58,6 +62,23 @@ impl Slot {
             Self::Composer => "composer",
         }
     }
+
+    /// Its context's type in `@lorealm/plugin`.
+    fn context(self) -> &'static str {
+        match self {
+            Self::Inspector => "InspectorContext",
+            Self::Message => "MessageContext",
+            Self::Composer => "ComposerContext",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum Frontend {
+    /// One HTML file with its script inline, built by nothing
+    Html,
+    /// TypeScript on `@lorealm/plugin`, bundled into one HTML file by Vite
+    Typescript,
 }
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
@@ -234,8 +255,15 @@ struct Answers {
     author: String,
     hooks: Vec<Hook>,
     slot: Option<Slot>,
+    frontend: Frontend,
     settings: bool,
     license: License,
+}
+
+impl Answers {
+    fn typescript(&self) -> bool {
+        self.slot.is_some() && self.frontend == Frontend::Typescript
+    }
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -247,17 +275,31 @@ pub fn run(args: Args) -> Result<()> {
     }
     write(&dir, &answers)?;
     let _ = output(&dir, "cargo", &["fmt"]);
-    
+
     Project::open(&dir)?;
-    
+
     if output(&dir, "git", &["rev-parse", "--git-dir"]).is_err() {
         let _ = output(&dir, "git", &["init"]);
     }
 
+    // Installing writes the lockfile the release workflow installs from.
+    let installed = answers.typescript()
+        && output(
+            &dir.join("frontend"),
+            "npm",
+            &["install", "--no-audit", "--no-fund"],
+        )
+        .is_ok();
+
     println!("Created {} in {}", answers.name, dir.display());
+    if answers.typescript() && !installed {
+        println!(
+            "Install the frontend's dependencies with `npm install` in its `frontend` folder."
+        );
+    }
     println!("Build it with `lorealm-plugin build` within the folder.");
-    
-    let (missing, _) = doctor::missing(false)?;
+
+    let (missing, _) = doctor::missing(false, answers.typescript())?;
     for line in missing {
         println!("{line}");
     }
@@ -291,6 +333,7 @@ fn ask(args: Args) -> Result<Answers> {
 
     let mut hooks = args.hooks;
     let mut slot = args.slot;
+    let mut frontend = args.frontend;
     let mut settings = args.settings;
     if !quiet {
         if hooks.is_empty() {
@@ -317,6 +360,14 @@ fn ask(args: Args) -> Result<Answers> {
             slot = [Slot::Inspector, Slot::Message, Slot::Composer]
                 .into_iter()
                 .find(|slot| picked.starts_with(slot.name()));
+        }
+        if slot.is_some() && frontend.is_none() {
+            let kinds = vec![
+                "HTML: one file, nothing to build",
+                "TypeScript: IDEs complete the API; built with Vite, needs Node",
+            ];
+            let picked = Select::new("Write the frontend in", kinds).raw_prompt()?;
+            frontend = Some(Frontend::value_variants()[picked.index]);
         }
         if !settings {
             settings = Confirm::new("Give it settings the user can fill in?")
@@ -347,6 +398,7 @@ fn ask(args: Args) -> Result<Answers> {
         author,
         hooks,
         slot,
+        frontend: frontend.unwrap_or(Frontend::Html),
         settings,
         license,
     })
@@ -375,22 +427,69 @@ fn write(dir: &Path, answers: &Answers) -> Result<()> {
     put("manifest.toml", manifest(answers))?;
     put("Cargo.toml", cargo(answers))?;
     put("src/lib.rs", source(answers))?;
-    put(".gitignore", "target\ndist\n".into())?;
+    put(
+        ".gitignore",
+        if answers.typescript() {
+            "target\ndist\nnode_modules\n"
+        } else {
+            "target\ndist\n"
+        }
+        .into(),
+    )?;
     put(
         "README.md",
         include_str!("../templates/README.md")
             .replace("{{name}}", &answers.name)
             .replace("{{description}}", &answers.description),
     )?;
+    // ubuntu-latest comes with Node, so the frontend only needs installing.
+    let npm_step = if answers.typescript() {
+        "      - run: npm ci --prefix frontend\n"
+    } else {
+        ""
+    };
     put(
         ".github/workflows/release.yml",
-        include_str!("../templates/release.yml").into(),
+        include_str!("../templates/release.yml").replace("{{npm}}\n", npm_step),
     )?;
-    if let Some(slot) = answers.slot {
-        put(
+    match answers.slot {
+        Some(slot) if answers.typescript() => {
+            let fill = |template: &str| {
+                template
+                    .replace("{{slot}}", slot.name())
+                    .replace("{{context}}", slot.context())
+                    .replace("{{api}}", API)
+            };
+            for (path, template) in [
+                (
+                    "package.json",
+                    include_str!("../templates/typescript/package.json"),
+                ),
+                (
+                    "tsconfig.json",
+                    include_str!("../templates/typescript/tsconfig.json"),
+                ),
+                (
+                    "vite.config.ts",
+                    include_str!("../templates/typescript/vite.config.ts"),
+                ),
+                (
+                    &format!("{}.html", slot.name()),
+                    include_str!("../templates/typescript/slot.html"),
+                ),
+                (
+                    &format!("src/{}.ts", slot.name()),
+                    include_str!("../templates/typescript/slot.ts"),
+                ),
+            ] {
+                put(&format!("frontend/{path}"), fill(template))?;
+            }
+        }
+        Some(slot) => put(
             &format!("frontend/{}.html", slot.name()),
             include_str!("../templates/slot.html").into(),
-        )?;
+        )?,
+        None => {}
     }
     if answers.settings {
         put(
@@ -468,14 +567,23 @@ backend = "target/wasm32-wasip2/release/{crate_name}.wasm"
 
 [build]
 backend = ["cargo", "build", "--release", "--target", "wasm32-wasip2"]
-"#,
+{frontend_build}"#,
         name = quoted(&answers.name),
         handle = quoted(&answers.handle),
         description = quoted(&answers.description),
         author = quoted(&answers.author),
         permissions = permissions.join(", "),
         crate_name = answers.handle,
+        frontend_build = if answers.typescript() {
+            "frontend = [\"npm\", \"run\", \"build\", \"--prefix\", \"frontend\"]\n"
+        } else {
+            ""
+        },
     );
+    if answers.typescript() {
+        // Vite builds the slot into one HTML file here.
+        manifest.push_str("\n[frontend]\npath = \"frontend/dist\"\n");
+    }
     if let Some(slot) = answers.slot {
         manifest.push_str(&format!(
             "\n[[frontend.slots]]\nslot = \"{slot}\"\nentry = \"{slot}.html\"\ntitle = {title}\n",

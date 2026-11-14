@@ -20,6 +20,8 @@ cargo install lorealm-plugin-cli
 
 `new` takes its answers as options too, for scripts: `lorealm-plugin new --yes --name "Word Count" --hook after-generate --slot message --license mit`. With `--yes` and no `--license`, no LICENSE is written.
 
+A frontend slot is plain HTML unless you pick TypeScript (`--frontend typescript`). Then it's written against [`@lorealm/plugin`](https://www.npmjs.com/package/@lorealm/plugin), so IDEs complete the `lorealm` API, and Vite bundles it into the one HTML file a slot has to be. That needs Node, and `doctor` checks for it in such a plugin.
+
 ## What a release holds
 
 One zip with `manifest.toml` at its top and the files it points at: the backend, the frontend when the plugin has slots, the README and the settings. A Lorealm server installs it as it is, without building anything.
